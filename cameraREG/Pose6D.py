@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # ==================== 导入华沿SDK ====================
-from CPS import CPSClient
+from robotSDK.CPS import CPSClient
 
 
 # ==================== 数据结构 ====================
