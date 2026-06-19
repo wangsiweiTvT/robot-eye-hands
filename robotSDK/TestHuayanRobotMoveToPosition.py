@@ -126,8 +126,8 @@ class TestHuayanRobotMoveToPosition(unittest.TestCase):
         print("测试1: 关节运动到零点位置 (J1=0, J2=0, J3=15, J4=0, J5=15, J6=0)")
 
         # 零点位置 (Elfin系列常见零点姿态)
-        point = [0, 0,15, 0, 15, 0]
-        raw_acs = [0, 0, 15, 0, 15, 0]
+        point = [0, 0,-45, 0, -45, 0]
+        raw_acs = [0, 0, -45, 0, -45, 0]
         s_tcp_name = "TCP"
         s_ucs_name = "Base"
         d_velocity = 40
