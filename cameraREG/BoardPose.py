@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OAK相机标定板检测模块
+OAK相机标定板检测模块 (使用左相机灰度图)
 用于手眼标定中的标定板位姿识别
 支持: 棋盘格 (Chessboard) 和 Charuco 板
 """
@@ -15,21 +15,22 @@ from typing import Tuple, Optional, List
 
 device_info = dai.DeviceInfo("169.254.1.222")
 
+
 # ==================== 数据结构 ====================
 @dataclass
 class BoardPose:
     """标定板位姿数据"""
-    success: bool  # 是否成功检测
-    x: float = 0.0  # X坐标 [mm]
-    y: float = 0.0  # Y坐标 [mm]
-    z: float = 0.0  # Z坐标 [mm]
-    rx: float = 0.0  # 绕X轴旋转 [deg]
-    ry: float = 0.0  # 绕Y轴旋转 [deg]
-    rz: float = 0.0  # 绕Z轴旋转 [deg]
-    rvec: np.ndarray = None  # 旋转向量 (原始数据)
-    tvec: np.ndarray = None  # 平移向量 (原始数据)
-    corners: np.ndarray = None  # 检测到的角点
-    error: float = 0.0  # 重投影误差
+    success: bool
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    rx: float = 0.0
+    ry: float = 0.0
+    rz: float = 0.0
+    rvec: np.ndarray = None
+    tvec: np.ndarray = None
+    corners: np.ndarray = None
+    error: float = 0.0
 
     def to_list(self) -> List[float]:
         return [self.x, self.y, self.z, self.rx, self.ry, self.rz]
@@ -43,36 +44,36 @@ class BoardPose:
         }
 
 
-# ==================== OAK相机标定板检测器 ====================
+# ==================== OAK相机标定板检测器 (左相机版本) ====================
 class OAKBoardDetector:
     """
-    OAK相机标定板检测器
+    OAK相机标定板检测器 (使用左相机灰度图)
     支持: 棋盘格 (Chessboard) 和 Charuco 板
     """
 
     def __init__(self,
                  board_type: str = "chessboard",
-                 board_size: Tuple[int, int] = (7, 10),
+                 board_size: Tuple[int, int] = (8, 11),
                  square_size: float = 30.0,
-                 camera_resolution: str = "1080p",
-                 preview_size: Tuple[int, int] = (640, 480)):
+                 preview_size: Tuple[int, int] = (640, 480),
+                 camera_fps: int = 15):
         """
         初始化标定板检测器
 
         Args:
             board_type: 标定板类型 "chessboard" 或 "charuco"
-            board_size: 棋盘格内角点数 (宽, 高)，如 (7, 10)
+            board_size: 棋盘格内角点数 (宽, 高)
             square_size: 方格大小 [mm]
-            camera_resolution: 相机分辨率 "1080p" 或 "4k"
             preview_size: 预览窗口大小
+            camera_fps: 相机帧率
         """
         self.board_type = board_type
         self.board_size = board_size
         self.square_size = square_size
         self.preview_size = preview_size
+        self.camera_fps = camera_fps
 
-        # 相机内参 (需要先标定或使用默认值)
-        # 注意: 为了获得高精度，建议先用OAK标定程序标定相机内参
+        # 相机内参 (使用左相机参数)
         self.camera_matrix = None
         self.dist_coeffs = None
 
@@ -97,16 +98,10 @@ class OAKBoardDetector:
         self.success_count = 0
 
     def _create_board_points(self) -> np.ndarray:
-        """
-        创建标定板3D坐标 (以标定板中心为原点)
-
-        Returns:
-            (N, 3) 的3D点坐标数组
-        """
+        """创建标定板3D坐标 (以标定板中心为原点)"""
         w, h = self.board_size
         objp = np.zeros((w * h, 3), dtype=np.float32)
 
-        # 以标定板中心为原点
         offset_x = (w - 1) * self.square_size / 2.0
         offset_y = (h - 1) * self.square_size / 2.0
 
@@ -121,40 +116,32 @@ class OAKBoardDetector:
 
     def _init_charuco(self):
         """初始化Charuco板"""
-        # 使用5x5的ArUco字典
         self.charuco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_250)
 
-        # 创建Charuco板
         w, h = self.board_size
         self.charuco_board = cv2.aruco.CharucoBoard(
             (w, h),
             self.square_size,
-            self.square_size * 0.6,  # 标记大小
+            self.square_size * 0.6,
             self.charuco_dict
         )
-
-        # Charuco检测参数
         self.charuco_params = cv2.aruco.DetectorParameters()
 
     def setup_camera(self, camera_matrix: np.ndarray = None,
                      dist_coeffs: np.ndarray = None) -> bool:
         """
-        设置相机内参 (如果不提供，会使用默认值)
-
-        Args:
-            camera_matrix: 3x3 相机内参矩阵
-            dist_coeffs: 畸变系数
+        设置相机内参
         """
         if camera_matrix is not None and dist_coeffs is not None:
             self.camera_matrix = camera_matrix
             self.dist_coeffs = dist_coeffs
             print("✓ 已加载相机内参")
         else:
-            # 默认内参 (适用于OAK-D 1080p)
-            # 注意: 这只是近似值，建议实际标定
+            # 左相机默认内参 (OAK-D 800P分辨率)
+            # 注意: 这是近似值，建议实际标定
             self.camera_matrix = np.array([
-                [600.0, 0.0, 640.0],
-                [0.0, 600.0, 360.0],
+                [600.0, 0.0, self.preview_size[0] / 2],
+                [0.0, 600.0, self.preview_size[1] / 2],
                 [0.0, 0.0, 1.0]
             ], dtype=np.float32)
             self.dist_coeffs = np.zeros((5, 1), dtype=np.float32)
@@ -162,37 +149,34 @@ class OAKBoardDetector:
 
         return True
 
-    def start_camera(self, camera_id: str = "auto") -> bool:
+    def start_camera(self) -> bool:
         """
-        启动OAK相机
-
-        Args:
-            camera_id: 相机ID，通常使用 "auto" 或 "192.168.1.10" (网络连接)
+        启动OAK相机 (使用左相机)
         """
-        print("正在启动OAK相机...")
+        print("正在启动OAK左相机...")
 
         try:
             # 创建pipeline
             self.pipeline = dai.Pipeline()
 
-            # 设置彩色相机节点
-            cam_rgb = self.pipeline.create(dai.node.ColorCamera)
-            cam_rgb.setPreviewSize(self.preview_size[0], self.preview_size[1])
-            cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-            cam_rgb.setInterleaved(False)
-            cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+            # ===== 创建左相机节点 (MonoCamera) =====
+            left_camera = self.pipeline.create(dai.node.MonoCamera)
+            left_camera.setBoardSocket(dai.CameraBoardSocket.LEFT)
+            left_camera.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
+            left_camera.setFps(self.camera_fps)
 
-            # 创建输出
-            xout_rgb = self.pipeline.create(dai.node.XLinkOut)
-            xout_rgb.setStreamName("rgb")
-            cam_rgb.preview.link(xout_rgb.input)
+            # ===== 创建输出节点 =====
+            xout_left = self.pipeline.create(dai.node.XLinkOut)
+            xout_left.setStreamName("left")
+            left_camera.out.link(xout_left.input)
 
-            # 连接设备
-            self.device = dai.Device(self.pipeline,device_info)
-            self.queue = self.device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+            # ===== 连接设备 =====
+            self.device = dai.Device(self.pipeline, device_info)
+            self.queue = self.device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
-            print(f"✓ OAK相机启动成功")
+            print(f"✓ OAK左相机启动成功")
             print(f"  预览分辨率: {self.preview_size}")
+            print(f"  帧率: {self.camera_fps} fps")
 
             return True
 
@@ -207,14 +191,15 @@ class OAKBoardDetector:
             self.device = None
         self.queue = None
         self.pipeline = None
+        cv2.destroyAllWindows()
         print("OAK相机已关闭")
 
     def get_frame(self) -> Optional[np.ndarray]:
         """
-        获取一帧图像
+        获取一帧左相机灰度图
 
         Returns:
-            BGR图像 或 None
+            灰度图 (np.uint8) 或 None
         """
         if self.queue is None:
             print("相机未启动")
@@ -223,7 +208,9 @@ class OAKBoardDetector:
         try:
             in_frame = self.queue.tryGet()
             if in_frame is not None:
-                return in_frame.getCvFrame()
+                # 获取灰度图
+                frame = in_frame.getCvFrame()
+                return frame
             return None
         except Exception as e:
             print(f"获取图像失败: {e}")
@@ -231,24 +218,26 @@ class OAKBoardDetector:
 
     def detect_chessboard(self, frame: np.ndarray) -> Tuple[bool, np.ndarray]:
         """
-        检测棋盘格
+        检测棋盘格 (输入为灰度图)
 
         Args:
-            frame: BGR图像
+            frame: 灰度图
 
         Returns:
             (是否检测成功, 角点坐标)
         """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # 查找棋盘格角点
         w, h = self.board_size
-        ret, corners = cv2.findChessboardCorners(gray, (w, h), None)
+
+        # 使用 FAST_CHECK 加速
+        ret, corners = cv2.findChessboardCorners(
+            frame, (w, h), None,
+            cv2.CALIB_CB_FAST_CHECK
+        )
 
         if ret:
             # 亚像素精确化
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.01)
+            corners = cv2.cornerSubPix(frame, corners, (5, 5), (-1, -1), criteria)
 
         return ret, corners
 
@@ -257,23 +246,21 @@ class OAKBoardDetector:
         检测Charuco板
 
         Args:
-            frame: BGR图像
+            frame: 灰度图
 
         Returns:
             (是否检测成功, 角点坐标)
         """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         # 检测ArUco标记
         detector = cv2.aruco.ArucoDetector(self.charuco_dict, self.charuco_params)
-        marker_corners, marker_ids, _ = detector.detectMarkers(gray)
+        marker_corners, marker_ids, _ = detector.detectMarkers(frame)
 
         if marker_ids is None or len(marker_ids) < 4:
             return False, None
 
         # 检测Charuco角点
         ret, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-            marker_corners, marker_ids, gray, self.charuco_board
+            marker_corners, marker_ids, frame, self.charuco_board
         )
 
         if ret > 3:  # 至少需要4个角点
@@ -284,31 +271,19 @@ class OAKBoardDetector:
     def compute_pose(self, corners: np.ndarray) -> BoardPose:
         """
         计算标定板位姿
-
-        Args:
-            corners: 检测到的角点坐标
-
-        Returns:
-            BoardPose 对象
         """
         if corners is None or len(corners) < 4:
             return BoardPose(success=False)
 
-        # 使用solvePnP计算位姿
-        # 注意: 需要根据实际检测到的角点数量调整object_points
         n_points = len(corners)
         if n_points != len(self.object_points):
-            # 如果角点数量不匹配，取前n_points个
             obj_points = self.object_points[:n_points]
         else:
             obj_points = self.object_points
 
-        # 转换为合适的格式
         if self.board_type == "charuco":
-            # Charuco返回的是 (N, 1, 2) 格式
             corners_2d = corners.reshape(-1, 2)
         else:
-            # 棋盘格返回的是 (N, 1, 2) 格式
             corners_2d = corners.reshape(-1, 2)
 
         # 求解PnP
@@ -336,7 +311,7 @@ class OAKBoardDetector:
         ))
 
         # 提取平移 (位置)
-        x, y, z = tvec.flatten() * 1.0  # OAK-D的单位是mm
+        x, y, z = tvec.flatten() * 1.0
 
         # 旋转向量转欧拉角
         rotation_matrix, _ = cv2.Rodrigues(rvec)
@@ -353,15 +328,7 @@ class OAKBoardDetector:
         )
 
     def _rotation_matrix_to_euler(self, R: np.ndarray) -> Tuple[float, float, float]:
-        """
-        旋转矩阵转欧拉角 (XYZ顺序)
-
-        Args:
-            R: 3x3 旋转矩阵
-
-        Returns:
-            (rx, ry, rz) 角度 [度]
-        """
+        """旋转矩阵转欧拉角 (XYZ顺序)"""
         sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
 
         if sy > 1e-6:
@@ -378,12 +345,6 @@ class OAKBoardDetector:
     def detect_and_pose(self, frame: np.ndarray) -> BoardPose:
         """
         检测标定板并计算位姿 (主接口)
-
-        Args:
-            frame: BGR图像
-
-        Returns:
-            BoardPose 对象
         """
         self.detection_count += 1
 
@@ -401,27 +362,25 @@ class OAKBoardDetector:
         if pose.success:
             self.success_count += 1
 
-        # 可视化
-        self._draw_board(frame, corners, pose)
+        # 可视化 (将灰度图转为彩色图以便绘制)
+        display_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        self._draw_board(display_frame, corners, pose)
 
         return pose
 
     def _draw_board(self, frame: np.ndarray, corners: np.ndarray, pose: BoardPose):
         """在图像上绘制检测结果"""
         if corners is not None:
-            # 绘制角点
             if self.board_type == "charuco":
                 cv2.aruco.drawDetectedCornersCharuco(frame, corners)
             else:
                 cv2.drawChessboardCorners(frame, self.board_size, corners, True)
 
         if pose.success:
-            # 绘制坐标系轴 (在标定板中心)
             if pose.rvec is not None and pose.tvec is not None:
                 cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs,
                                   pose.rvec, pose.tvec, self.square_size * 2)
 
-            # 显示位姿信息
             info = f"X={pose.x:.1f} Y={pose.y:.1f} Z={pose.z:.1f}mm"
             info += f" | Rx={pose.rx:.1f} Ry={pose.ry:.1f} Rz={pose.rz:.1f}°"
             info += f" | err={pose.error:.2f}px"
@@ -429,22 +388,13 @@ class OAKBoardDetector:
             cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                         0.6, (0, 255, 0), 2)
 
-            # 显示检测统计
             rate = self.success_count / max(self.detection_count, 1) * 100
             status = f"Detect: {self.detection_count} | Success: {self.success_count} | Rate: {rate:.1f}%"
             cv2.putText(frame, status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                         0.5, (255, 255, 255), 1)
 
     def get_pose_for_calibration(self, timeout: float = 30.0) -> Optional[BoardPose]:
-        """
-        获取用于手眼标定的位姿数据 (持续检测直到成功)
-
-        Args:
-            timeout: 超时时间 [秒]
-
-        Returns:
-            BoardPose 对象 或 None
-        """
+        """获取用于手眼标定的位姿数据"""
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -456,9 +406,10 @@ class OAKBoardDetector:
             pose = self.detect_and_pose(frame)
 
             # 显示实时画面
-            cv2.imshow("Board Detection", frame)
+            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            cv2.imshow("Board Detection", display)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:  # 'q' 或 ESC
+            if key == ord('q') or key == 27:
                 break
 
             if pose.success:
@@ -475,61 +426,54 @@ class OAKBoardDetector:
 def test_board_detection():
     """独立测试标定板检测"""
     print("=" * 60)
-    print("OAK相机标定板检测测试")
+    print("OAK左相机标定板检测测试")
     print("=" * 60)
 
-    # 1. 创建检测器
     detector = OAKBoardDetector(
-        board_type="chessboard",  # 或 "charuco"
-        board_size=(8, 11),  # 棋盘格内角点数
-        square_size=30.0,  # 方格大小 [mm]
-        preview_size=(640, 480)
+        board_type="chessboard",
+        board_size=(8, 11),
+        square_size=30.0,
+        preview_size=(640, 480),
+        camera_fps=15
     )
 
-    # 2. 设置相机内参 (如果有标定好的参数，请替换)
-    # 注意: 这里的默认值精度有限，建议先用OAK标定程序标定
     detector.setup_camera()
 
-    # 3. 启动相机
     if not detector.start_camera():
         print("相机启动失败，请检查连接")
         return
 
     print("\n" + "-" * 60)
     print("操作提示:")
-    print("  - 将标定板放在相机视野内")
+    print("  - 将标定板放在左相机视野内")
     print("  - 按 's' 键保存当前位姿数据")
     print("  - 按 'r' 键重置统计")
     print("  - 按 'q' 或 ESC 键退出")
     print("-" * 60)
 
-    # 4. 测试循环
     saved_poses = []
     frame_count = 0
 
     try:
         while True:
-            # 获取帧
             frame = detector.get_frame()
             if frame is None:
                 continue
 
             frame_count += 1
 
-            # 检测并计算位姿
             pose = detector.detect_and_pose(frame)
 
-            # 显示
-            cv2.imshow("Board Detection", frame)
+            # 显示 (灰度图转彩色图)
+            display = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            cv2.imshow("Board Detection", display)
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord('s') and pose.success:
-                # 保存位姿
                 saved_poses.append(pose.to_dict())
                 print(f"\n✓ 已保存位姿 #{len(saved_poses)}: {pose.to_dict()}")
 
             elif key == ord('r'):
-                # 重置统计
                 detector.detection_count = 0
                 detector.success_count = 0
                 saved_poses = []
@@ -541,11 +485,9 @@ def test_board_detection():
     except KeyboardInterrupt:
         print("\n用户中断")
     finally:
-        # 5. 关闭相机
         detector.stop_camera()
         cv2.destroyAllWindows()
 
-    # 6. 显示统计结果
     print("\n" + "=" * 60)
     print("测试结果统计:")
     print(f"  总帧数: {frame_count}")
@@ -563,5 +505,4 @@ def test_board_detection():
 
 # ==================== 命令行入口 ====================
 if __name__ == "__main__":
-    # 运行测试
     test_board_detection()
